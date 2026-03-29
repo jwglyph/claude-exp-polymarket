@@ -138,7 +138,9 @@ class RiskManager:
             "daily_volume": self.state.daily_volume,
             "open_exposure": self.state.open_exposure,
             "portfolio_value": self.portfolio_value,
-            "risk_utilization": abs(self.state.daily_pnl) / (self.portfolio_value * self.config.daily_risk_cap)
-            if self.state.daily_pnl < 0
-            else 0.0,
+            "risk_utilization": (
+                abs(self.state.daily_pnl) / (self.portfolio_value * self.config.daily_risk_cap)
+                if self.state.daily_pnl < 0 and self.portfolio_value > 0 and self.config.daily_risk_cap > 0
+                else 0.0
+            ),
         }

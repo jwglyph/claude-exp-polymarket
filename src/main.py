@@ -134,24 +134,33 @@ async def run_bot(settings: Settings, dry_run: bool = True, portfolio: float = 1
 
         console.print("[bold blue]Starting Polymarket BTC Arbitrage Bot...[/bold blue]")
 
-        if dry_run:
-            console.print("[yellow]Running in DRY RUN mode (no real trades)[/yellow]")
-        else:
+        # Check credentials before doing anything
+        if not dry_run:
             if not settings.credentials.is_configured:
                 console.print("[red]ERROR: API credentials not configured. Set .env file.[/red]")
+                console.print("[red]Need: POLYMARKET_API_KEY, API_SECRET, API_PASSPHRASE, PRIVATE_KEY[/red]")
                 return
             console.print("[red bold]LIVE TRADING MODE — Real money at risk![/red bold]")
+        else:
+            console.print("[yellow]Running in DRY RUN mode (no real trades)[/yellow]")
 
         # Initial market discovery
         console.print("[dim]Discovering BTC markets on Polymarket...[/dim]")
         markets = await monitor.discover_btc_markets()
-        console.print(f"[green]Found {len(markets)} BTC markets[/green]")
+        if not markets:
+            console.print("[yellow]WARNING: No BTC markets found. Bot will retry periodically.[/yellow]")
+        else:
+            console.print(f"[green]Found {len(markets)} BTC markets[/green]")
         brackets = monitor.parse_btc_brackets()
-        console.print(f"[green]Parsed {len(brackets)} price brackets[/green]")
+        if markets and not brackets:
+            console.print("[yellow]WARNING: Markets found but no price brackets parsed.[/yellow]")
+        else:
+            console.print(f"[green]Parsed {len(brackets)} price brackets[/green]")
 
         cycle_count = 0
         btc_price: float | None = None
         opportunities: list = []
+        no_price_warned = False
 
         with Live(console=console, refresh_per_second=2) as live:
             while True:
@@ -162,6 +171,12 @@ async def run_bot(settings: Settings, dry_run: bool = True, portfolio: float = 1
                     # 1. Fetch real BTC prices
                     await feeds.fetch_all()
                     btc_price = feeds.get_median_price()
+
+                    if btc_price is None and not no_price_warned:
+                        console.print("[yellow]WARNING: No BTC price data from exchanges yet.[/yellow]")
+                        no_price_warned = True
+                    elif btc_price is not None:
+                        no_price_warned = False
 
                     # 2. Refresh Polymarket prices (every 5 cycles)
                     if cycle_count % 5 == 0:
@@ -197,7 +212,9 @@ async def run_bot(settings: Settings, dry_run: bool = True, portfolio: float = 1
                     live.update(dashboard)
 
                 except Exception as e:
+                    import traceback
                     console.print(f"[red]Error in cycle {cycle_count}: {e}[/red]")
+                    console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
                 # Sleep for next cycle
                 elapsed = time.time() - cycle_start

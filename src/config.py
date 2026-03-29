@@ -36,7 +36,7 @@ class PolymarketCredentials:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.api_key and self.private_key)
+        return bool(self.api_key and self.api_secret and self.api_passphrase and self.private_key)
 
 
 @dataclass(frozen=True)

@@ -475,3 +475,116 @@ class TestConfigEdgeCases:
         assert s.trading.divergence_threshold == 0.003
         assert s.trading.daily_risk_cap == 0.02
         assert s.chain_id == 137
+
+    def test_partial_credentials_not_configured(self):
+        """Having only api_key and private_key but missing secret/passphrase."""
+        creds = PolymarketCredentials(
+            api_key="key", api_secret="", api_passphrase="",
+            wallet_address="0x123", private_key="0xabc",
+        )
+        assert not creds.is_configured
+
+
+# ── Risk Stats Edge Cases ──
+
+class TestRiskStats:
+    def test_stats_with_zero_portfolio(self):
+        """Stats should not crash with zero portfolio."""
+        config = TradingConfig()
+        rm = RiskManager(config, portfolio_value=0)
+        rm.record_pnl(-5.0)
+        stats = rm.stats
+        assert stats["risk_utilization"] == 0.0  # No division by zero
+
+    def test_stats_with_zero_risk_cap(self):
+        """Stats should not crash with zero daily_risk_cap."""
+        config = TradingConfig(daily_risk_cap=0.0)
+        rm = RiskManager(config, portfolio_value=1000)
+        rm.record_pnl(-5.0)
+        stats = rm.stats
+        assert stats["risk_utilization"] == 0.0
+
+
+# ── Bracket Parsing: k suffix ──
+
+class TestBracketParsingKSuffix:
+    def test_parses_k_suffix(self):
+        """'$100k' should parse as $100,000."""
+        monitor = PolymarketMonitor(make_settings())
+        monitor._markets["test"] = MarketInfo(
+            condition_id="test",
+            question="Will BTC be above $100k?",
+            token_id_yes="yes", token_id_no="no",
+            outcome_yes_price=0.65, outcome_no_price=0.35,
+            volume=100000, end_date="2026-03-31", active=True,
+        )
+        brackets = monitor.parse_btc_brackets()
+        assert len(brackets) == 1
+        assert brackets[0].threshold_price == 100000
+
+    def test_parses_K_uppercase(self):
+        """'$100K' should also parse as $100,000."""
+        monitor = PolymarketMonitor(make_settings())
+        monitor._markets["test"] = MarketInfo(
+            condition_id="test",
+            question="BTC above $100K by Friday",
+            token_id_yes="yes", token_id_no="no",
+            outcome_yes_price=0.65, outcome_no_price=0.35,
+            volume=100000, end_date="2026-03-31", active=True,
+        )
+        brackets = monitor.parse_btc_brackets()
+        assert len(brackets) == 1
+        assert brackets[0].threshold_price == 100000
+
+    def test_no_k_suffix_not_multiplied(self):
+        """'$95,000' should NOT be multiplied by 1000."""
+        monitor = PolymarketMonitor(make_settings())
+        monitor._markets["test"] = MarketInfo(
+            condition_id="test",
+            question="Will BTC be above $95,000 on April 1?",
+            token_id_yes="yes", token_id_no="no",
+            outcome_yes_price=0.65, outcome_no_price=0.35,
+            volume=100000, end_date="2026-04-01", active=True,
+        )
+        brackets = monitor.parse_btc_brackets()
+        assert len(brackets) == 1
+        assert brackets[0].threshold_price == 95000  # NOT 95000000
+
+
+# ── Detector Expiry Parsing ──
+
+class TestDetectorExpiry:
+    def test_parses_iso_date(self):
+        hours = DivergenceDetector._hours_until_expiry("2026-04-01T00:00:00Z")
+        assert hours > 0  # Should be some positive hours in the future
+
+    def test_empty_date_returns_default(self):
+        hours = DivergenceDetector._hours_until_expiry("")
+        assert hours == 24.0
+
+    def test_invalid_date_returns_default(self):
+        hours = DivergenceDetector._hours_until_expiry("not-a-date")
+        assert hours == 24.0
+
+    def test_past_date_returns_minimum(self):
+        hours = DivergenceDetector._hours_until_expiry("2020-01-01T00:00:00Z")
+        assert hours == 0.01  # Clamped to minimum
+
+    def test_per_market_expiry_used(self):
+        """When time_to_expiry_hours is None, should use market end_date."""
+        detector = DivergenceDetector(0.003)
+        market = MarketInfo(
+            condition_id="test",
+            question="BTC above $95,000?",
+            token_id_yes="yes", token_id_no="no",
+            outcome_yes_price=0.65, outcome_no_price=0.35,
+            volume=100000, end_date="2026-04-01T00:00:00Z", active=True,
+        )
+        bracket = BTCBracket(
+            threshold_price=95000, yes_price=0.65, no_price=0.35,
+            market=market, condition_id="test",
+            token_id_yes="yes", token_id_no="no",
+        )
+        # Should not crash when using per-market expiry
+        opps = detector.scan_brackets([bracket], 100000, time_to_expiry_hours=None)
+        assert len(opps) == 1

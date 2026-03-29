@@ -110,23 +110,47 @@ class DivergenceDetector:
 
         return max(0.01, min(0.99, prob))
 
+    @staticmethod
+    def _hours_until_expiry(end_date: str) -> float:
+        """Parse end_date and compute hours until expiry."""
+        if not end_date:
+            return 24.0  # Default fallback
+        try:
+            from datetime import datetime, timezone
+            # Handle ISO format with or without timezone
+            end_date = end_date.replace("Z", "+00:00")
+            expiry = datetime.fromisoformat(end_date)
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            delta = (expiry - now).total_seconds() / 3600.0
+            return max(0.01, delta)  # At least ~36 seconds
+        except (ValueError, TypeError):
+            return 24.0  # Fallback on parse failure
+
     def scan_brackets(
         self,
         brackets: list[BTCBracket],
         real_btc_price: float,
-        time_to_expiry_hours: float = 24.0,
+        time_to_expiry_hours: float | None = None,
     ) -> list[Opportunity]:
         """Scan all brackets for divergence opportunities.
 
+        If time_to_expiry_hours is None, uses each market's end_date.
         Returns list of actionable opportunities sorted by edge size.
         """
         opportunities: list[Opportunity] = []
 
         for bracket in brackets:
+            expiry_hours = (
+                time_to_expiry_hours
+                if time_to_expiry_hours is not None
+                else self._hours_until_expiry(bracket.market.end_date)
+            )
             fair = self.estimate_fair_value(
                 real_btc_price,
                 bracket.threshold_price,
-                time_to_expiry_hours=time_to_expiry_hours,
+                time_to_expiry_hours=expiry_hours,
             )
 
             market_yes = bracket.yes_price

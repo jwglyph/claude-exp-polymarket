@@ -94,7 +94,14 @@ class PolymarketMonitor:
                     "limit": 50,
                 },
             ) as resp:
+                if resp.status != 200:
+                    print(f"[polymarket] Gamma API returned HTTP {resp.status}")
+                    return markets
                 events = await resp.json()
+
+            if not isinstance(events, list):
+                print(f"[polymarket] Unexpected API response type: {type(events).__name__}")
+                return markets
 
             for event in events:
                 title = (event.get("title") or "").lower()
@@ -199,8 +206,9 @@ class PolymarketMonitor:
         import re
 
         brackets: list[BTCBracket] = []
+        # Capture optional k/K suffix as a separate group
         price_pattern = re.compile(
-            r"\$\s*([\d,]+(?:\.\d+)?)\s*[kK]?", re.IGNORECASE
+            r"\$\s*([\d,]+(?:\.\d+)?)\s*([kK])?", re.IGNORECASE
         )
 
         for market in self._markets.values():
@@ -214,8 +222,7 @@ class PolymarketMonitor:
             raw = match.group(1).replace(",", "")
             threshold = float(raw)
             # Handle "100k" -> 100000
-            suffix = question[match.end() - 1: match.end()]
-            if suffix.lower() == "k":
+            if match.group(2):
                 threshold *= 1000
 
             brackets.append(
