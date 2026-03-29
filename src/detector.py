@@ -89,6 +89,9 @@ class DivergenceDetector:
         if threshold_price <= 0:
             return 1.0
 
+        if real_price <= 0:
+            return 0.01  # Price at zero → virtually no chance of being above threshold
+
         # Distance from threshold as a ratio
         ratio = real_price / threshold_price
 

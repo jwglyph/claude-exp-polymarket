@@ -24,7 +24,7 @@ from rich.panel import Panel
 from rich.layout import Layout
 from rich.text import Text
 
-from .config import load_settings, Settings
+from .config import load_settings, Settings, TradingConfig
 from .price_feeds import PriceFeedAggregator
 from .polymarket import PolymarketMonitor
 from .detector import DivergenceDetector, Signal
@@ -231,7 +231,7 @@ def main() -> None:
         # Override threshold via CLI
         settings = Settings(
             credentials=settings.credentials,
-            trading=Settings.trading.__class__(
+            trading=TradingConfig(
                 divergence_threshold=args.threshold,
                 max_risk_per_trade=settings.trading.max_risk_per_trade,
                 daily_risk_cap=settings.trading.daily_risk_cap,
