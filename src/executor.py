@@ -1,7 +1,8 @@
-"""Trade executor — places orders on Polymarket's CLOB.
+"""Trade executor — places MAKER orders on Polymarket's CLOB.
 
-Handles order creation, submission, and tracking via the
-Polymarket CLOB API (py-clob-client).
+Key insight: taker fees (2%) destroy the edge. Maker fees are 0%.
+So we post limit orders at fair value and wait for fills, rather
+than crossing the spread.
 """
 
 from __future__ import annotations
@@ -66,15 +67,24 @@ class TradeExecutor:
             await self._session.close()
 
     def _build_order_payload(self, opportunity: Opportunity, size: float) -> dict:
-        """Build the CLOB API order payload."""
+        """Build a MAKER limit order payload.
+
+        Posts at the fair value (not the current market price) so we're
+        adding liquidity and paying 0% maker fee. The market comes to us
+        as Polymarket catches up to the real BTC price.
+        """
         if opportunity.signal == Signal.BUY_YES:
             token_id = opportunity.bracket.token_id_yes
             side = "BUY"
-            price = min(opportunity.market_price + self._settings.trading.max_slippage, 0.99)
+            # Post bid at fair value — below current ask, so we're a maker
+            price = min(opportunity.fair_value, opportunity.market_price - 0.001)
+            price = max(0.01, min(price, 0.99))
         elif opportunity.signal == Signal.BUY_NO:
             token_id = opportunity.bracket.token_id_no
             side = "BUY"
-            price = min(opportunity.bracket.no_price + self._settings.trading.max_slippage, 0.99)
+            no_fair = 1.0 - opportunity.fair_value
+            price = min(no_fair, opportunity.bracket.no_price - 0.001)
+            price = max(0.01, min(price, 0.99))
         else:
             return {}
 
@@ -83,7 +93,7 @@ class TradeExecutor:
             "price": round(price, 4),
             "size": round(size, 2),
             "side": side,
-            "type": "GTC",  # Good-till-cancelled
+            "type": "GTC",  # Good-till-cancelled, rests on book as maker
         }
 
     async def execute(self, opportunity: Opportunity) -> OrderResult | None:
