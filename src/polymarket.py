@@ -81,10 +81,53 @@ class PolymarketMonitor:
             await self._session.close()
 
     async def discover_btc_markets(self) -> list[MarketInfo]:
-        """Find active BTC price prediction markets via Gamma API."""
+        """Find active BTC price prediction markets.
+
+        Searches both the CLOB sampling-markets endpoint (which has
+        current BTC price-bracket markets) and the Gamma events API.
+        """
         session = await self._ensure_session()
         markets: list[MarketInfo] = []
 
+        # ── Source 1: CLOB sampling-markets (more reliable for price brackets) ──
+        try:
+            async with session.get(
+                f"{self._settings.clob_api_url}/sampling-markets",
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for m in data.get("data", []):
+                        question = (m.get("question") or "").lower()
+                        if "bitcoin" not in question and "btc" not in question:
+                            continue
+                        if not m.get("active") or m.get("closed"):
+                            continue
+                        tokens = m.get("tokens", [])
+                        if len(tokens) < 2:
+                            continue
+
+                        yes_token = next((t for t in tokens if t.get("outcome") == "Yes"), tokens[0])
+                        no_token = next((t for t in tokens if t.get("outcome") == "No"), tokens[1])
+
+                        market = MarketInfo(
+                            condition_id=m.get("condition_id", ""),
+                            question=m.get("question", ""),
+                            token_id_yes=yes_token.get("token_id", ""),
+                            token_id_no=no_token.get("token_id", ""),
+                            outcome_yes_price=float(yes_token.get("price", 0)),
+                            outcome_no_price=float(no_token.get("price", 0)),
+                            volume=0,
+                            end_date=m.get("end_date_iso", ""),
+                            active=True,
+                        )
+                        markets.append(market)
+                        self._markets[market.condition_id] = market
+                else:
+                    print(f"[polymarket] CLOB sampling-markets returned HTTP {resp.status}")
+        except Exception as e:
+            print(f"[polymarket] Error fetching CLOB sampling-markets: {e}")
+
+        # ── Source 2: Gamma events API (fallback / additional markets) ──
         try:
             async with session.get(
                 f"{self._settings.gamma_api_url}/events",
@@ -100,7 +143,6 @@ class PolymarketMonitor:
                 events = await resp.json()
 
             if not isinstance(events, list):
-                print(f"[polymarket] Unexpected API response type: {type(events).__name__}")
                 return markets
 
             for event in events:
@@ -111,6 +153,9 @@ class PolymarketMonitor:
                 for market_data in event.get("markets", []):
                     if not market_data.get("active"):
                         continue
+                    cid = market_data.get("conditionId", "")
+                    if cid in self._markets:
+                        continue  # Already found via CLOB
                     tokens = market_data.get("clobTokenIds", [])
                     if len(tokens) < 2:
                         continue
@@ -119,7 +164,7 @@ class PolymarketMonitor:
                         continue
 
                     market = MarketInfo(
-                        condition_id=market_data.get("conditionId", ""),
+                        condition_id=cid,
                         question=market_data.get("question", ""),
                         token_id_yes=tokens[0],
                         token_id_no=tokens[1],
@@ -133,7 +178,7 @@ class PolymarketMonitor:
                     self._markets[market.condition_id] = market
 
         except Exception as e:
-            print(f"[polymarket] Error discovering markets: {e}")
+            print(f"[polymarket] Error discovering Gamma markets: {e}")
 
         return markets
 
@@ -165,29 +210,25 @@ class PolymarketMonitor:
             return None
 
     async def refresh_prices(self) -> list[MarketInfo]:
-        """Re-fetch prices for all known markets."""
+        """Re-fetch prices for all known markets using CLOB midpoint API."""
         session = await self._ensure_session()
         updated: list[MarketInfo] = []
 
         for cid, market in list(self._markets.items()):
             try:
-                async with session.get(
-                    f"{self._settings.gamma_api_url}/markets/{cid}",
-                ) as resp:
-                    data = await resp.json()
-
-                prices = data.get("outcomePrices", [])
-                if len(prices) >= 2:
+                # Use CLOB midpoint for the YES token
+                mid = await self.fetch_midpoint(market.token_id_yes)
+                if mid is not None:
                     market = MarketInfo(
                         condition_id=cid,
                         question=market.question,
                         token_id_yes=market.token_id_yes,
                         token_id_no=market.token_id_no,
-                        outcome_yes_price=float(prices[0]),
-                        outcome_no_price=float(prices[1]),
-                        volume=float(data.get("volume", market.volume)),
+                        outcome_yes_price=mid,
+                        outcome_no_price=max(0, 1.0 - mid),
+                        volume=market.volume,
                         end_date=market.end_date,
-                        active=data.get("active", True),
+                        active=True,
                     )
                     self._markets[cid] = market
                     updated.append(market)
@@ -199,41 +240,67 @@ class PolymarketMonitor:
     def parse_btc_brackets(self) -> list[BTCBracket]:
         """Parse market questions to extract BTC price brackets.
 
-        Looks for patterns like:
-        - "Will Bitcoin be above $95,000 on March 31?"
-        - "BTC above $100k?"
+        Handles two market types:
+        - "Will Bitcoin reach $120,000 by ...?" → YES = BTC goes above threshold
+        - "Will Bitcoin dip to $55,000 by ...?" → YES = BTC goes below threshold
+          (inverted: we swap YES/NO so YES always means "above threshold")
+
+        Filters out non-price-bracket markets (e.g. "MicroStrategy sells Bitcoin").
         """
         import re
 
         brackets: list[BTCBracket] = []
-        # Capture optional k/K suffix as a separate group
         price_pattern = re.compile(
             r"\$\s*([\d,]+(?:\.\d+)?)\s*([kK])?", re.IGNORECASE
+        )
+        # Only match markets that are clearly price-level markets
+        price_keywords = re.compile(
+            r"(reach|above|below|dip|hit|over|under)", re.IGNORECASE
         )
 
         for market in self._markets.values():
             if not market.active:
                 continue
             question = market.question
+            if not price_keywords.search(question):
+                continue
             match = price_pattern.search(question)
             if not match:
                 continue
 
             raw = match.group(1).replace(",", "")
             threshold = float(raw)
-            # Handle "100k" -> 100000
             if match.group(2):
                 threshold *= 1000
+
+            # Skip if threshold is unreasonably far from BTC prices
+            # (e.g. "$1m" markets, "$1700" old markets)
+            if threshold < 10_000 or threshold > 500_000:
+                continue
+
+            # "dip to" markets: YES means BTC goes BELOW threshold
+            # Invert so YES always means "above threshold" for the detector
+            is_dip = bool(re.search(r"\b(dip|below|under)\b", question, re.IGNORECASE))
+            if is_dip:
+                yes_price = market.outcome_no_price
+                no_price = market.outcome_yes_price
+                token_yes = market.token_id_no
+                token_no = market.token_id_yes
+            else:
+                yes_price = market.outcome_yes_price
+                no_price = market.outcome_no_price
+                token_yes = market.token_id_yes
+                token_no = market.token_id_no
 
             brackets.append(
                 BTCBracket(
                     threshold_price=threshold,
-                    yes_price=market.outcome_yes_price,
-                    no_price=market.outcome_no_price,
+                    yes_price=yes_price,
+                    no_price=no_price,
                     market=market,
                     condition_id=market.condition_id,
-                    token_id_yes=market.token_id_yes,
-                    token_id_no=market.token_id_no,
+                    token_id_yes=token_yes,
+                    token_id_no=token_no,
                 )
             )
 
