@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "polymarket-btc-arb"
 version = "0.1.0"
 description = "BTC price-lag arbitrage bot for Polymarket"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
     "aiohttp>=3.9",
     "websockets>=12.0",
